@@ -614,7 +614,7 @@ def create_multislice(
             if vmin is None:
                 vmin = 0.1
             if vmax is None:
-                vmax = 2.2
+                vmax = 2.5
     black_bg = True if facecolor == "k" else False
     cbar_ticks = np.round(np.linspace(vmin, vmax, 3), 1)
 
@@ -882,6 +882,16 @@ steps:
         help="Gzip processed NIfTI files (raw files are untouched)",
     )
     parser.add_argument(
+        "--skip_proc",
+        action="store_true",
+        help=(
+            "Skip PET processing and jump straight to multislice PDF creation.\n"
+            + "Requires PET to have already been processed, otherwise PET\n"
+            + "processing is still complated. Use this flag with --overwrite to\n"
+            + "keep PET processing untouched but overwrite multislice PDFs"
+        ),
+    )
+    parser.add_argument(
         "--skip_multislice",
         action="store_true",
         help="Process PET but skip multislice PDF creation",
@@ -1049,7 +1059,9 @@ if __name__ == "__main__":
     # Process each scan and save a multislice PDF of the processed
     # image.
     for subj in pet_proc.query("to_process == True").index:
-        if op.isfile(pet_proc.at[subj, "proc_petf"]) and not args.overwrite:
+        if op.isfile(pet_proc.at[subj, "proc_petf"]) and (
+            args.skip_proc or not args.overwrite
+        ):
             if verbose:
                 subj = pet_proc.at[subj, "raw_cp_petf"].split(op.sep)[-5].split("-")[1]
                 print("\n{}\n{}".format(subj, "-" * len(subj)))
