@@ -14,9 +14,8 @@ import numpy as np
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
+import nibabel as nib
 from nilearn import plotting
-import PyPDF2
-import pikepdf
 
 sys.path.append(op.join(op.expanduser("~"), "code"))
 import general.nifti.nifti_ops as nops
@@ -25,14 +24,19 @@ import general.nifti.nifti_shell as niish
 from general.basic.helper_funcs import Timer
 import general.basic.str_methods as strm
 import general.osops.os_utils as osu
+import general.array.array_operations as aop
 
 matplotlib.rcParams["pdf.fonttype"] = 42
 
 
 def find_scans_to_process(
     base_dir,
+    raw_dirname="raw",
+    proc_dirname="proc",
     process_subjs=None,
     proc_res=[8, 8, 8],
+    skip_smooth=False,
+    skip_coreg=True,
     overwrite=False,
     save_output=True,
     verbose=True,
@@ -43,72 +47,92 @@ def find_scans_to_process(
     ----------
     base_dir : str
         Path to the base directory of the project.
+    raw_dirname : str
+        Name of the raw data directory.
+    proc_dirname : str
+        Name of the processed data directory.
     process_subjs : list of str
         List of subject IDs to process. If None, all subjects will be
         processed.
     proc_res : list[int, int, int]
         Final resolution of the processed PET scans.
+    skip_smooth : bool
+        If True, skip smoothing the PET scans.
+    skip_coreg : bool
+        If True, skip coregistering the PET scans to the target image.
     overwrite : bool
         If True, overwrite existing processed PET scans.
-    save_output : bool
-        If True, save the output dataframe to a csv file in
-        base_dir/data.
-    verbose : bool
-        If True, print status messages.
 
     Returns
     -------
-    proc_df : pandas.DataFrame
+    pet_proc : pandas.DataFrame
         A dataframe of subjects to process.
     """
     # Get a list of subjects in the raw directory.
-    subjs = [d.split("-")[1] for d in os.listdir(op.join(base_dir, "data", "raw"))]
+    subjs = []
+    for d in os.listdir(op.join(base_dir, "data", raw_dirname)):
+        if d.startswith("sub-"):
+            subjs.append(d.split("-")[1])
+        else:
+            subjs.append(d)
 
     # Initialize the output dataframe.
-    proc_df = pd.DataFrame(
+    pet_proc = pd.DataFrame(
         index=subjs,
         columns=[
             "pet_date",
             "tracer",
             "raw_petf",
-            "mean_petf",
-            "smean_petf",
-            "rsmean_petf",
+            "raw_cp_petf",
+            "proc_petf",
             "multislicef",
+            "merged_multislicef",
             "input_res",
             "proc_res",
-            "process",
-            "processing_complete",
+            "skip_smooth",
+            "skip_coreg",
+            "already_processed",
+            "to_process",
+            "just_processed",
             "notes",
         ],
     )
-    proc_df["proc_res"] = [proc_res] * len(proc_df)
-    proc_df["process"] = True
-    proc_df["processing_complete"] = False
-    proc_df["notes"] = ""
+    pet_proc["raw_petf"] = ""
+    pet_proc["raw_cp_petf"] = ""
+    pet_proc["proc_res"] = [proc_res] * len(pet_proc)
+    pet_proc["already_processed"] = False
+    pet_proc["to_process"] = True
+    pet_proc["just_processed"] = False
+    pet_proc["notes"] = ""
     if process_subjs:
-        exclude_subjs = [subj for subj in proc_df.index if subj not in process_subjs]
-        proc_df.loc[exclude_subjs, "process"] = False
+        _process_subjs = []
+        for subj in process_subjs:
+            if subj.startswith("sub-"):
+                _process_subjs.append(subj.split("-")[1])
+            else:
+                _process_subjs.append(subj)
+        exclude_subjs = [subj for subj in pet_proc.index if subj not in _process_subjs]
+        pet_proc.loc[exclude_subjs, "to_process"] = False
 
     # Find the raw PET scan for each subject.
     for subj in subjs:
-        raw_pet_files = _get_raw_files(base_dir, subj)
+        raw_pet_files = _get_raw_files(base_dir, raw_dirname, subj)
         if len(raw_pet_files) == 1:
-            proc_df.at[subj, "raw_petf"] = raw_pet_files[0]
+            pet_proc.at[subj, "raw_petf"] = raw_pet_files[0]
         elif len(raw_pet_files) == 0:
-            proc_df.at[subj, "process"] = False
-            proc_df.at[subj, "notes"] += "No raw PET scan found. "
+            pet_proc.at[subj, "to_process"] = False
+            pet_proc.at[subj, "notes"] += "No raw PET scan found. "
         else:
-            proc_df.at[subj, "process"] = False
-            proc_df.at[subj, "notes"] += "Multiple raw PET scans found. "
+            pet_proc.at[subj, "to_process"] = False
+            pet_proc.at[subj, "notes"] += "Multiple raw PET scans found. "
 
     # Parse the raw PET filepath to determine PET acquisition date,
     # tracer, and starting resolution.
     for subj in subjs:
-        if proc_df.at[subj, "process"] is False:
+        if pet_proc.at[subj, "to_process"] is False:
             continue
 
-        raw_petf = proc_df.at[subj, "raw_petf"]
+        raw_petf = pet_proc.at[subj, "raw_petf"]
 
         # Get the PET acquisition date.
         pet_date_dir = raw_petf.split(op.sep)[-3]
@@ -116,26 +140,26 @@ def find_scans_to_process(
             pet_date = datetime.datetime.strptime(
                 pet_date_dir[:10], "%Y-%m-%d"
             ).strftime("%Y-%m-%d")
-            proc_df.at[subj, "pet_date"] = pet_date
+            pet_proc.at[subj, "pet_date"] = pet_date
         except ValueError:
-            proc_df.at[subj, "process"] = False
-            proc_df.at[
+            pet_proc.at[subj, "to_process"] = False
+            pet_proc.at[
                 subj, "notes"
             ] += "Can't parse PET acquisition date from the raw PET filepath. "
 
         # Get the tracer.
         tracer = _get_tracer(op.basename(raw_petf))
         if tracer is not None:
-            proc_df.at[subj, "tracer"] = tracer
+            pet_proc.at[subj, "tracer"] = tracer
         else:
-            proc_df.at[subj, "process"] = False
-            proc_df.at[subj, "notes"] += "Can't parse tracer from raw PET filename. "
+            pet_proc.at[subj, "to_process"] = False
+            pet_proc.at[subj, "notes"] += "Can't parse tracer from raw PET filename. "
 
         # Get the starting resolution.
         if "uniform_6mm_res" in op.basename(raw_petf).lower():
-            proc_df.at[subj, "input_res"] = [6, 6, 6]
+            pet_proc.at[subj, "input_res"] = [6, 6, 6]
         elif "uniform_8mm_res" in op.basename(raw_petf).lower():
-            proc_df.at[subj, "input_res"] = [8, 8, 8]
+            pet_proc.at[subj, "input_res"] = [8, 8, 8]
         elif ("uniform_" in op.basename(raw_petf).lower()) and (
             "mm_res" in op.basename(raw_petf).lower()
         ):
@@ -143,109 +167,124 @@ def find_scans_to_process(
             input_res = float(
                 op.basename(raw_petf).lower().split("uniform_")[1].split("mm_res")[0]
             )
-            proc_df.at[subj, "input_res"] = [input_res, input_res, input_res]
+            pet_proc.at[subj, "input_res"] = [input_res, input_res, input_res]
         else:
-            proc_df.at[subj, "process"] = False
-            proc_df.at[
+            pet_proc.at[subj, "to_process"] = False
+            pet_proc.at[
                 subj, "notes"
             ] += "Can't parse starting resolution from raw PET filename. "
 
     # Find the processed PET scan for each subject.
     for subj in subjs:
-        if proc_df.at[subj, "process"] is False:
+        if pet_proc.at[subj, "to_process"] is False:
             continue
-        elif np.unique(proc_df.at[subj, "proc_res"]).size != 1:
-            proc_df.at[subj, "process"] = False
-            proc_df.at[
+        elif np.unique(pet_proc.at[subj, "proc_res"]).size != 1:
+            pet_proc.at[subj, "to_process"] = False
+            pet_proc.at[
                 subj, "notes"
             ] += "Can't determine proc PET filename due to multiple unique proc_res values. "
             continue
         elif np.any(
-            np.asanyarray(proc_df.at[subj, "proc_res"])
-            < np.asanyarray(proc_df.at[subj, "input_res"])
+            np.asanyarray(pet_proc.at[subj, "proc_res"])
+            < np.asanyarray(pet_proc.at[subj, "input_res"])
         ):
-            proc_df.at[subj, "process"] = False
-            proc_df.at[
+            pet_proc.at[subj, "to_process"] = False
+            pet_proc.at[
                 subj, "notes"
             ] += "Can't smooth PET to a lower final resolution than input resolution. "
             continue
 
+        # Figure out what processing steps will be performed.
+        if skip_smooth or np.array_equal(
+            pet_proc.at[subj, "input_res"], pet_proc.at[subj, "proc_res"]
+        ):
+            pet_proc.at[subj, "skip_smooth"] = True
+        else:
+            pet_proc.at[subj, "skip_smooth"] = False
+        pet_proc.at[subj, "skip_coreg"] = skip_coreg
+
+        # Get the processed PET filepaths.
         proc_pet_files = _get_proc_files(
             base_dir=base_dir,
+            proc_dirname=proc_dirname,
             subj=subj,
-            tracer=proc_df.at[subj, "tracer"],
-            pet_date=proc_df.at[subj, "pet_date"],
-            proc_res=proc_df.at[subj, "proc_res"],
+            tracer=pet_proc.at[subj, "tracer"],
+            pet_date=pet_proc.at[subj, "pet_date"],
+            proc_res=pet_proc.at[subj, "proc_res"],
+            skip_smooth=pet_proc.at[subj, "skip_smooth"],
+            skip_coreg=pet_proc.at[subj, "skip_coreg"],
         )
         for key, val in proc_pet_files.items():
-            proc_df.at[subj, key] = val
-        if np.all(
-            [
-                op.isfile(nops.find_gzip(f, return_infile=True))
-                for f in proc_pet_files.values()
-            ]
-        ):
-            proc_df.at[subj, "processing_complete"] = True
+            pet_proc.at[subj, key] = val
+        check_files = ["proc_petf", "multislicef", "merged_multislicef"]
+        if np.all([op.isfile(proc_pet_files[key]) for key in check_files]):
+            pet_proc.at[subj, "already_processed"] = True
             if not overwrite:
-                proc_df.at[subj, "process"] = False
+                pet_proc.at[subj, "to_process"] = False
+        for key in check_files:
+            if not op.isfile(pet_proc.at[subj, key]):
+                pet_proc.at[subj, key] = ""
 
-    # Save the output dataframe to a csv file.
-    if save_output:
-        outfile = op.join(base_dir, "data", ".proc_df.csv")
-        try:
-            if op.exists(outfile):
-                os.remove(outfile)
-            proc_df.to_csv(outfile, index=True, index_label="subj")
-        except (PermissionError, BlockingIOError):
-            print(f"Could not save {outfile}")
-        if verbose:
-            print(f"Saved {outfile}")
-
-    return proc_df
+    return pet_proc
 
 
-def _get_raw_files(base_dir, subj):
+def _get_raw_files(base_dir, raw_dirname, subj):
     raw_pet_files = glob(
-        op.join(base_dir, "data", "raw", f"sub-{subj}", "**", "*.nii*"), recursive=True
+        op.join(base_dir, "data", raw_dirname, f"sub-{subj}", "**", "*.nii*"),
+        recursive=True,
     )
     return raw_pet_files
 
 
-def _get_proc_files(base_dir, subj, tracer, pet_date, proc_res):
+def _get_proc_files(
+    base_dir, proc_dirname, subj, tracer, pet_date, proc_res, skip_smooth, skip_coreg
+):
     proc_dir = op.join(
-        base_dir, "data", "proc", f"sub-{subj}", f"pet-{tracer}", f"ses-{pet_date}"
+        base_dir,
+        "data",
+        proc_dirname,
+        f"sub-{subj}",
+        f"pet-{tracer}",
+        f"ses-{pet_date}",
     )
     intermed_dir = op.join(proc_dir, "intermed")
-    proc_files = od(
-        [
-            (
-                "mean_petf",
-                op.join(
-                    intermed_dir, f"mean_sub-{subj}_pet-{tracer}_ses-{pet_date}.nii"
-                ),
+    proc_files = od([])
+    proc_files["raw_cp_petf"] = op.join(
+        intermed_dir, f"mean_sub-{subj}_pet-{tracer}_ses-{pet_date}.nii"
+    )
+    if skip_smooth and skip_coreg:
+        proc_files["proc_petf"] = op.join(
+            proc_dir, op.basename(proc_files["raw_cp_petf"])
+        )
+    elif skip_coreg and not skip_smooth:
+        proc_files["proc_petf"] = op.join(
+            proc_dir,
+            strm.add_presuf(
+                op.basename(proc_files["raw_cp_petf"]), prefix=f"s{proc_res[0]}"
             ),
-            (
-                "smean_petf",
-                op.join(
-                    intermed_dir,
-                    f"s{proc_res[0]}mean_sub-{subj}_pet-{tracer}_ses-{pet_date}.nii",
-                ),
+        )
+    elif skip_smooth and not skip_coreg:
+        proc_files["proc_petf"] = op.join(
+            proc_dir,
+            strm.add_presuf(op.basename(proc_files["raw_cp_petf"]), prefix="r"),
+        )
+    else:
+        proc_files["proc_petf"] = op.join(
+            proc_dir,
+            strm.add_presuf(
+                op.basename(proc_files["raw_cp_petf"]), prefix=f"rs{proc_res[0]}"
             ),
-            (
-                "rsmean_petf",
-                op.join(
-                    proc_dir,
-                    f"rs{proc_res[0]}mean_sub-{subj}_pet-{tracer}_ses-{pet_date}.nii",
-                ),
-            ),
-            (
-                "multislicef",
-                op.join(
-                    proc_dir,
-                    f"rs{proc_res[0]}mean_sub-{subj}_pet-{tracer}_ses-{pet_date}_multislice.pdf",
-                ),
-            ),
-        ]
+        )
+    for key in proc_files:
+        proc_files[key] = nops.find_gzip(proc_files[key], return_infile=True)
+    proc_files["multislicef"] = op.join(
+        proc_dir,
+        strm.add_presuf(op.basename(proc_files["proc_petf"]), suffix="_multislice")
+        .replace(".nii.gz", ".pdf")
+        .replace(".nii", ".pdf"),
+    )
+    proc_files["merged_multislicef"] = strm.add_presuf(
+        proc_files["multislicef"], suffix="_merged"
     )
     return proc_files
 
@@ -303,104 +342,163 @@ def _get_tracer(basename):
         return None
 
 
+def _save_logfile(base_dir, pet_proc, verbose=True):
+    """Save the processing dataframe to a csv file."""
+    # Get the current date and time in string format.
+    now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    outfile = op.join(base_dir, "logs", f"pet_proc_{now}.csv")
+    try:
+        if op.exists(outfile):
+            os.remove(outfile)
+        pet_proc.to_csv(outfile, index=True, index_label="subj")
+        if verbose:
+            print(f"\nSaved logfile: {outfile}")
+        return outfile
+    except (PermissionError, BlockingIOError):
+        print(f"Could not save logfile {outfile}")
+
+
 def process_pet(
     base_dir,
     raw_petf,
-    mean_petf,
+    raw_cp_petf,
     tracer,
     input_res=[6, 6, 6],
     proc_res=[8, 8, 8],
     coreg_dof=6,
+    skip_smooth=False,
+    skip_coreg=True,
     use_spm=True,
+    gzip_niftis=True,
     verbose=True,
 ):
-    """Process PET image for visual read."""
+    """Process PET image for visual read.
+
+    Returns
+    -------
+    outfiles : list
+        List of files generated during processing (in order from
+        first to last). Copied files are included, but initial names for
+        renamed files are not retained. At time of return all outfiles
+        therefore exist.
+    """
     if verbose:
-        subj = mean_petf.split(op.sep)[-5].split("-")[1]
+        subj = raw_cp_petf.split(op.sep)[-5].split("-")[1]
         print("\n{}\n{}".format(subj, "-" * len(subj)))
+
+    # Delete existing processed files.
+    proc_dir = op.dirname(op.dirname(raw_cp_petf))
+    osu.rm_files(proc_dir)
 
     # Setup proc directory structure.
     if verbose:
-        print("  Setting up proc/ directory structure")
-    os.makedirs(op.dirname(mean_petf), exist_ok=True)
-    os.chdir(op.dirname(mean_petf))
+        print("  Setting up directories...")
+    os.makedirs(op.dirname(raw_cp_petf), exist_ok=True)
+    os.chdir(op.dirname(raw_cp_petf))
+    outfiles = []
 
     # Copy out the raw PET file.
     if verbose:
-        print("  Copying mean PET from raw/ to proc/")
-    _ = shutil.copy(src=raw_petf, dst=mean_petf)
+        print(
+            "  Copying PET from {}/ to {}/...".format(
+                raw_petf.replace(base_dir, "").split("/")[2],
+                raw_cp_petf.replace(base_dir, "").split("/")[2],
+            )
+        )
+    # Make sure the copy file has the correct extension.
+    if raw_petf.endswith(".nii.gz") and raw_cp_petf.endswith(".nii"):
+        raw_cp_petf += ".gz"
+    elif raw_petf.endswith(".nii") and raw_cp_petf.endswith(".nii.gz"):
+        raw_cp_petf = raw_cp_petf[:-3]
+    _outfile = shutil.copy(src=raw_petf, dst=raw_cp_petf)
+    outfiles.append(_outfile)
 
     # Reset origin to center.
     if verbose:
-        print("  Resetting origin to center")
-    _ = nops.recenter_nii(mean_petf, verbose=False)
+        print("  Resetting origin to center...")
+    *_, _outfile = nops.recenter_nii(outfiles[-1], verbose=False)
+    if _outfile != outfiles[-1]:
+        outfiles.append(_outfile)
 
     # Smooth PET to target resolution.
-    if np.all(np.asanyarray(input_res) == np.asanyarray(proc_res)):
-        smean_petf = strm.add_presuf(mean_petf, prefix=f"s{proc_res[0]}")
-        _ = shutil.copy(src=mean_petf, dst=smean_petf)
-    else:
+    if not skip_smooth:
         if use_spm:
             if verbose:
-                print("  Smoothing PET (SPM)")
-            outfiles_smooth = spm_preproc.spm_smooth(
-                mean_petf,
+                print("  Smoothing PET (SPM)...")
+            if outfiles[-1].endswith(".nii.gz"):
+                outfiles[-1] = nops.gunzip_nii(outfiles[-1])
+            _outfile = spm_preproc.spm_smooth(
+                outfiles[-1],
                 res_in=input_res,
                 res_target=proc_res,
                 prefix=f"s{proc_res[0]}",
-            )
-            assert len(outfiles_smooth) == 1
-            smean_petf = outfiles_smooth[0]
+            )[0]
         else:
             if verbose:
-                print("  Smoothing PET (niimath)")
-            smean_petf = niish.niimath_smooth(
-                mean_petf,
+                print("  Smoothing PET (niimath)...")
+            _outfile = niish.niimath_smooth(
+                outfiles[-1],
                 res_in=input_res,
                 res_target=proc_res,
                 prefix=f"s{proc_res[0]}",
-                verbose=verbose,
+                verbose=False,
             )
+        if _outfile != outfiles[-1]:
+            outfiles.append(_outfile)
 
     # Coregister PET to standard space.
-    templatef = op.join(base_dir, "templates", f"rTemplate_{tracer}-all.nii")
-    if use_spm:
-        if verbose:
-            print(
-                f"  Applying 6-degree linear coregistration and reslicing PET to standard space (SPM12)"
-            )
-        jobtype = "estwrite"
-        outfiles_coreg = spm_preproc.spm_coregister(
-            source=smean_petf, target=templatef, jobtype=jobtype, out_prefix="r"
+    if not skip_coreg:
+        targetf = nops.find_gzip(
+            op.join(base_dir, "templates", f"rTemplate_{tracer}-all.nii"),
+            raise_error=True,
         )
-        assert len(outfiles_coreg) == 1
-        _rsmean_petf = outfiles_coreg[0]
-    else:
-        if verbose:
-            print(
-                f"  Applying {coreg_dof}-degree linear coregistration and reslicing PET to standard space (FSL)"
+        if use_spm:
+            if verbose:
+                print(
+                    f"  Applying 6-degree linear coreg and reslicing PET to target res (SPM12)..."
+                )
+            if outfiles[-1].endswith(".nii.gz"):
+                outfiles[-1] = nops.gunzip_nii(outfiles[-1])
+            if targetf.endswith(".nii.gz"):
+                targetf = nops.gunzip_nii(targetf)
+            jobtype = "estwrite"
+            _outfile = spm_preproc.spm_coregister(
+                source=outfiles[-1], target=targetf, jobtype=jobtype, out_prefix="r"
+            )[0]
+        else:
+            if verbose:
+                print(
+                    f"  Applying {coreg_dof}-degree linear coreg and reslicing PET to target res (FSL)..."
+                )
+            _outfile = niish.fsl_flirt(
+                infile=outfiles[-1],
+                target=targetf,
+                dof=coreg_dof,
+                prefix="r",
+                verbose=False,
             )
-        _rsmean_petf = niish.fsl_flirt(
-            infile=smean_petf,
-            target=templatef,
-            dof=coreg_dof,
-            prefix="r",
-            verbose=verbose,
+        if _outfile != outfiles[-1]:
+            outfiles.append(_outfile)
+
+    # Move the final PET image to its parent directory.
+    _outfile = op.join(op.dirname(op.dirname(outfiles[-1])), op.basename(outfiles[-1]))
+    _outfile = shutil.move(src=outfiles[-1], dst=_outfile)
+    outfiles[-1] = _outfile
+    if verbose:
+        print(
+            "  Done!\n"
+            + "  Processed PET image: {}/\n".format(op.dirname(outfiles[-1]))
+            + "                       {}".format(op.basename(outfiles[-1]))
         )
 
-    # Move the coregistered PET file from intermed/ to its parent
-    # directory.
-    if verbose:
-        print("  Moving coregistered PET from intermed/ to parent directory")
-    rsmean_petf = op.join(
-        op.dirname(op.dirname(_rsmean_petf)), op.basename(_rsmean_petf)
-    )
-    _ = shutil.move(src=_rsmean_petf, dst=rsmean_petf)
+    # Gzip or gunzip the processed and intermediary niftis.
+    for ii in range(len(outfiles)):
+        if gzip_niftis:
+            outfiles[ii] = nops.gzip_nii(outfiles[ii])
+        else:
+            outfiles[ii] = nops.gunzip_nii(outfiles[ii])
 
-    if verbose:
-        print("  PET processing done\n")
-
-    return rsmean_petf
+    return outfiles
 
 
 def create_multislice(
@@ -409,17 +507,22 @@ def create_multislice(
     tracer,
     pet_date,
     display_mode="z",
-    cut_coords=[-51, -30, -21, -6, 9, 24, 39, 54],
+    cut_coords=[-50, -37, -24, -11, 2, 15, 28, 41],
+    crop=True,
+    crop_cut=0.05,
     annotate=False,
     draw_cross=False,
     colorbar=False,
     cbar_tick_format="%.2f",
     figsize=(13.33, 7.5),
     dpi=300,
-    font={"tick": 12, "label": 14, "title": 20, "annot": 12},
+    font={"tick": 12, "label": 14, "title": 16, "annot": 14},
     cmap=None,
+    autoscale=False,
     vmin=None,
     vmax=None,
+    facecolor="k",
+    fontcolor="w",
     title=None,
     fig=None,
     ax=None,
@@ -442,6 +545,10 @@ def create_multislice(
         The display mode to use.
     cut_coords : list, optional
         The cut coordinates to use.
+    crop : bool, optional
+        Whether to crop the image.
+    crop_cut : float, optional
+        The threshold to use for cropping.
     annotate : bool, optional
         Whether to annotate the slices.
     draw_cross : bool, optional
@@ -467,46 +574,63 @@ def create_multislice(
     verbose : bool, optional
         Whether to print status messages.
     """
-    tracer_fancy = {"FBB": "Florbetaben", "FBP": "Florbetapir"}[tracer]
-    auto_ticks = (vmin is None) and (vmax is None)
+    # Return the outfile if it already exists.
+    outfile = (
+        strm.add_presuf(imagef, suffix="_multislice")
+        .replace(".nii.gz", ".pdf")
+        .replace(".nii", ".pdf")
+    )
+    if op.isfile(outfile) and not overwrite:
+        if verbose:
+            print(
+                "  Multislice PDF: {}\n".format(op.dirname(outfile))
+                + "                  {}".format(op.basename(outfile))
+            )
+        return outfile
+
+    # Configure plot parameters.
+    tracer_fancy = {"FBB": "[18F]Florbetaben", "FBP": "[18F]Florbetapir"}[tracer]
+    if autoscale:
+        dat = nops.load_nii_flex(imagef, dat_only=True)
+        dat = dat[dat > 0]
+        vmin = 0.1
+        vmax = np.percentile(dat, 99.5)
     if tracer == "FBB":
         if cmap is None:
             cmap = "binary_r"
-        if vmin is None or vmin == "auto":
-            vmin = 0
-        if vmax is None:
-            vmax = 2.5
-        elif vmax == "auto":
-            vmax = np.nanmax(nops.load_nii_flex(imagef, dat_only=True))
-        if auto_ticks:
-            cbar_ticks = [0, 0.5, 1, 1.5, 2, 2.5]
-        else:
-            cbar_ticks = np.round(np.linspace(vmin, vmax, 5), 1)
-        facecolor = "k"
-        fontcolor = "w"
-        black_bg = True
+            facecolor = "k"
+            fontcolor = "w"
+        if not autoscale:
+            if vmin is None:
+                vmin = 0.1
+            if vmax is None:
+                vmax = 2.5
     elif tracer == "FBP":
         if cmap is None:
             cmap = "binary"
-        if vmin is None or vmin == "auto":
-            vmin = 0
-        if vmax is None:
-            vmax = 2.2
-        elif vmax == "auto":
-            vmax = np.nanmax(nops.load_nii_flex(imagef, dat_only=True))
-        if auto_ticks:
-            cbar_ticks = [0, 0.55, 1.1, 1.65, 2.2]
-        else:
-            cbar_ticks = np.round(np.linspace(vmin, vmax, 5), 1)
-        facecolor = "w"
-        fontcolor = "k"
-        black_bg = False
+            facecolor = "w"
+            fontcolor = "k"
+        if not autoscale:
+            if vmin is None:
+                vmin = 0.1
+            if vmax is None:
+                vmax = 2.2
+    black_bg = True if facecolor == "k" else False
+    cbar_ticks = np.round(np.linspace(vmin, vmax, 3), 1)
+
+    # Crop the data array.
+    img, dat = nops.load_nii(imagef)
+    if crop:
+        mask = dat > (vmin * 2)
+        dat = aop.crop_arr3d(dat, mask, crop_cut)
+        img = nib.Nifti1Image(dat, img.affine)
+        img, *_ = nops.recenter_nii(img)
 
     # Make the plot.
     plt.close("all")
     if fig is None or ax is None:
         fig, ax = plt.subplots(
-            3, 1, height_ratios=[1.2, 6, 1.8], figsize=figsize, dpi=dpi
+            3, 1, height_ratios=[0.75, 5, 1.75], figsize=figsize, dpi=dpi
         )
         ax = np.ravel(ax)
     else:
@@ -516,7 +640,7 @@ def create_multislice(
     _ax = ax[iax]
     warnings.filterwarnings("ignore", category=UserWarning)
     display = plotting.plot_anat(
-        imagef,
+        img,
         cut_coords=cut_coords,
         display_mode=display_mode,
         annotate=annotate,
@@ -540,16 +664,21 @@ def create_multislice(
         ax=_ax,
         location="bottom",
         pad=0.1,
-        shrink=0.8,
-        aspect=30,
+        shrink=0.25,
+        aspect=15,
         drawedges=False,
     )
     cbar.outline.set_color(fontcolor)
     cbar.outline.set_linewidth(1)
-    cbar.ax.tick_params(labelsize=font["tick"], labelcolor=fontcolor)
+    cbar.ax.tick_params(
+        labelsize=font["tick"], labelcolor=fontcolor, color=fontcolor, width=1
+    )
     cbar.ax.set_xticks(cbar_ticks)
     cbar.ax.set_xlabel(
-        f"{tracer_fancy} SUVR", fontsize=font["label"], color=fontcolor, labelpad=10
+        f"{tracer_fancy} SUVR",
+        fontsize=font["label"],
+        color=fontcolor,
+        labelpad=8,
     )
 
     # Format the top and bottom of the figure.
@@ -557,9 +686,14 @@ def create_multislice(
         _ax = ax[iax]
         _ax.axis("off")
 
-    _ax = ax[1]
+    _ax = ax[0]
     _ax.set_title(
-        f"{subj}: {tracer_fancy} {pet_date}", fontsize=font["title"], color=fontcolor
+        f"Participant: {subj}\n"
+        + f"Scan date: {pet_date}\n"
+        + f"Tracer: {tracer_fancy}",
+        fontsize=font["title"],
+        color=fontcolor,
+        loc="left",
     )
 
     for iax in range(len(ax)):
@@ -568,31 +702,26 @@ def create_multislice(
     fig.patch.set_facecolor(facecolor)
 
     # Save the figure as a pdf.
-    outfile = (
-        strm.add_presuf(imagef, prefix="_", suffix="_multislice")
-        .replace(".nii.gz", ".pdf")
-        .replace(".nii", ".pdf")
+    fig.savefig(
+        outfile,
+        facecolor=facecolor,
+        dpi=dpi,
+        bbox_inches="tight",
+        pad_inches=0.2,
     )
-    if overwrite or not op.isfile(outfile):
-        fig.savefig(
-            outfile,
-            facecolor=facecolor,
-            dpi=dpi,
-            bbox_inches="tight",
-            pad_inches=0.2,
+    if verbose:
+        print(
+            "  Multislice PDF: {}\n".format(op.dirname(outfile))
+            + "                  {}".format(op.basename(outfile))
         )
-        if verbose:
-            print(f"  Saved {outfile}")
-        return outfile
-    else:
-        return None
+    return outfile
 
 
 def merge_multislice(
-    intermed_mslicef,
+    infile,
     template_dir,
     tracer,
-    remove_intermed=True,
+    remove_infile=False,
     overwrite=False,
     verbose=True,
 ):
@@ -600,12 +729,12 @@ def merge_multislice(
 
     Parameters
     ----------
-    intermed_mslicef : str
+    infile : str
         The multi-slice PDF to merge with the template.
     tracer : str
         The PET tracer.
-    remove_intermed : bool
-        Whether to remove the intermediate multislice file.
+    remove_infile : bool
+        Whether to remove the input multislice file.
     overwrite : bool
         Whether to overwrite the output file if it already exists.
     verbose : bool
@@ -616,55 +745,35 @@ def merge_multislice(
     outfile : str
         The merged PDF.
     """
+    assert infile.endswith(".pdf")
+
+    # Return the outfile if it already exists.
+    outfile = strm.add_presuf(infile, suffix="_merged")
+    if op.isfile(outfile) and not overwrite:
+        if verbose:
+            print(
+                "  Merged PDF: {}\n".format(op.dirname(outfile))
+                + "              {}".format(op.basename(outfile))
+            )
+        return outfile
+
     # Load the template PDF
     templatef = op.join(template_dir, f"ADNI4_{tracer}_template.pdf")
 
-    # Get the output filename.
-    outfile = op.join(op.dirname(intermed_mslicef), op.basename(intermed_mslicef)[1:])
-
     # Merge the PDFs.
-    cmd = f"qpdf --linearize --qdf --optimize-images --empty --pages {templatef} 1 {intermed_mslicef} 1 -- {outfile}"
+    cmd = f"qpdf --linearize --qdf --optimize-images --empty --pages {templatef} 1 {infile} 1 -- {outfile}"
     _ = osu.run_cmd(cmd)
     if verbose:
-        print(f"  Saved {outfile}")
-
-    # writer = PyPDF2.PdfWriter()
-    # for filename in [templatef, intermed_mslicef]:
-    #     reader = PyPDF2.PdfReader(filename)
-    #     page = reader.pages[0]
-    #     page.scale_to(width=960, height=540)  # 13.33 x 7.5 inches
-    #     page.compress_content_streams()
-    #     writer.add_page(page)
-    #     if filename == templatef:
-    #         writer.add_metadata(reader.metadata)
+        print(
+            "  Merged PDF: {}\n".format(op.dirname(outfile))
+            + "              {}".format(op.basename(outfile))
+        )
 
     # Remove the intermediary file.
-    if remove_intermed:
-        os.remove(intermed_mslicef)
+    if remove_infile:
+        os.remove(infile)
         if verbose:
-            print(f"  Removed {intermed_mslicef}")
-
-    # # Save the merged PDF.
-    # if overwrite or not op.isfile(outfile):
-    #     if op.isfile(outfile):
-    #         os.remove(outfile)
-    #     with open(outfile, "wb") as output:
-    #         writer.write(output)
-    #     if verbose:
-    #         print(f"  Saved {outfile}")
-    # else:
-    #     return None
-
-    # # Close file descriptors.
-    # writer.close()
-
-    # # Fix the file so Acrobat can open it.
-    # _tmp_outfile = strm.add_presuf(outfile, prefix="__")
-
-    # with pikepdf.Pdf.open(outfile) as pdf:
-    #     pdf.save(_tmp_outfile, qdf=True)
-    # os.remove(outfile)
-    # os.rename(_tmp_outfile, outfile)
+            print(f"  Removed {infile}")
 
     return outfile
 
@@ -675,27 +784,46 @@ def _parse_args():
         description="""Process ADNI amyloid PET scans for visual read.
 
 steps:
-  [1] Copy PET scan from [base_dir]/raw/[subject]/[nested_dirs_from_LONI]/[pet_scan].nii
-      to [base_dir]/data/proc/sub-[subject]/pet-[tracer]/ses-[pet_date]/intermed/
+  [1] Copy PET scan from [base_dir]/data/[raw_dirname]/[subject]/[nested_dirs_from_LONI]/[pet_scan].nii
+      to [base_dir]/data/[proc_dirname]/sub-[subject]/pet-[tracer]/ses-[pet_date]/intermed/
       mean_sub-[subject]_pet-[tracer]_ses-[pet_date].nii
-  [2] Reset origin to center (changing header info of the copied image)
-  [3] Smooth PET to a specified resolution (default 8mm isotropic). Note that if the
-      input and final resolutions are the same, smoothing is skipped
-  [4] Coregister PET (default 6-degree rigid body transform) to a standard space
-  [5] Save axial multislice images of the coregistered scan as a PDF, and merge
-      this file with the canonical positive and negative scan template
-      for the matching tracer.""",
+  [2] Reset origin to center (saves over header info of the copied image)
+  [3] Smooth PET to a defined resolution (default 8mm isotropic). Note that if the input
+      and final resolutions are the same, smoothing is skipped (optional step,
+      default=True)
+  [4] [Coregister and reslice PET (default 6-degree rigid body transform) to a standard
+       space (optional step, default=False)]
+  [5] Gzip NIfTI files (optional step, default=True)
+  [6] Save a PDF of axial multislices of the processed PET scan and a merged PDF
+      that also shows canonical positive and negative scans for the same tracer""",
         formatter_class=TextFormatter,
         exit_on_error=False,
     )
     parser.add_argument(
-        "-d",
         "--base_dir",
         type=str,
         default="/Volumes/petcore/Projects/ADNI_Reads",
         help=(
-            "Path to base directory where data/ and templates/ are stored.\n"
-            + "Default: %(default)s"
+            "Path to base directory where data/ and templates/ are stored\n"
+            + "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--raw_dirname",
+        type=str,
+        default="raw",
+        help=(
+            "Name of the subdirectory in [base_dir]/data where raw PET files for scans\n"
+            + "to process are stored (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--proc_dirname",
+        type=str,
+        default="proc",
+        help=(
+            "Name of the subdirectory in [base_dir]/data where processed PET and\n"
+            + "multislice files are stored (default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -704,31 +832,29 @@ steps:
         nargs="*",
         type=str,
         help=(
-            "List of subjects to process. If --subjects is not specified and\n"
-            + "--overwrite is not specified, then all unprocessed subjects in\n"
-            + "[base_dir]/raw/ will be processed. If --overwrite is specified,\n"
-            + "then all subjects in [base_dir]/raw/ will be processed."
+            "List of subjects to process. If --subjects is not defined and\n"
+            + "--overwrite is not defined, then all unprocessed subjects in\n"
+            + "[base_dir]/data/[raw_dirname]/ will be processed. If --overwrite is\n"
+            + "defined, then all subjects in [base_dir]/data/raw/ will be processed"
         ),
     )
     parser.add_argument(
-        "--skip_proc",
-        action="store_true",
-        help=(
-            "Skip image processing and go straight to multislice creation\n"
-            + "(only works if images have already been processed; otherwise\n"
-            + "process_pet() is still called)"
-        ),
-    )
-    parser.add_argument(
-        "--use_spm",
-        action="store_true",
-        help="Use SPM for processing, instead of default FSL and niimath",
+        "--smooth",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Smooth PET to the resolution defined by --final_res",
     )
     parser.add_argument(
         "--final_res",
         default=8,
         type=float,
-        help="Final resolution (FWHM) of smoothed PET scans, in mm. Default: %(default)s",
+        help="Final resolution (FWHM) of smoothed PET, in mm (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--coreg",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help="Coregister and reslice PET to standard space",
     )
     parser.add_argument(
         "--coreg_dof",
@@ -745,28 +871,47 @@ steps:
         ),
     )
     parser.add_argument(
+        "--use_spm",
+        action="store_true",
+        help="Use SPM for processing, instead of default FSL and niimath",
+    )
+    parser.add_argument(
+        "--gzip",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Gzip processed NIfTI files (raw files are untouched)",
+    )
+    parser.add_argument(
         "--skip_multislice",
         action="store_true",
         help="Process PET but skip multislice PDF creation",
     )
     parser.add_argument(
         "-z",
-        "--zslice",
+        "--slices",
         type=int,
         nargs="+",
-        default=[
-            -46,
-            -32,
-            -18,
-            -4,
-            10,
-            24,
-            38,
-            52,
-        ],  # [-51, -30, -21, -6, 9, 24, 39, 54],
+        default=[-50, -37, -24, -11, 2, 15, 28, 41],
+        # [-32, -18, -4, 10, 24, 38, 52] [-51, -30, -21, -6, 9, 24, 39, 54]
         help=(
             "List of image slices to show along the z-axis, in MNI coordinates\n"
-            + "Default: %(default)s"
+            + "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--crop",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Crop the multislice images to the brain",
+    )
+    parser.add_argument(
+        "--crop_cut",
+        type=float,
+        default=0.05,
+        help=(
+            "Defines how tightly to crop the brain for multislice creation\n"
+            + "(proportion of voxels > 0 in each plane that are allowed to be cropped)\n"
+            + "(default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -778,19 +923,28 @@ steps:
         ),
     )
     parser.add_argument(
+        "--autoscale",
+        action="store_true",
+        help=(
+            "Set multislice vmin and vmax to to 0.01 and the 99.5th percentile\n"
+            + "of nonzero values, respectively (overrides --vmin, --vmax,\n"
+            + "and tracer-specific default scaling)"
+        ),
+    )
+    parser.add_argument(
         "--vmin",
+        type=float,
         help=(
             "Minimum intensity threshold for the multislice images\n"
-            + "(overrides the tracer-specific defaults). Can be a float or\n"
-            + "'auto', in which case vmax is set to the maximum intensity"
+            + "(overrides the tracer-specific defaults)"
         ),
     )
     parser.add_argument(
         "--vmax",
+        type=float,
         help=(
             "Maximum intensity threshold for the multislice images\n"
-            + "(overrides the tracer-specific defaults). Can be a float or\n"
-            + "'auto', in which case vmax is set to the maximum intensity"
+            + "(overrides the tracer-specific defaults)"
         ),
     )
     parser.add_argument(
@@ -801,10 +955,10 @@ steps:
     )
 
     # Parse the command line arguments
-    if len(sys.argv) == 1:
+    args = parser.parse_args()
+    if (len(sys.argv) == 1) and not op.isdir(args.base_dir):
         parser.print_help()
         sys.exit()
-    args = parser.parse_args()
     return args
 
 
@@ -840,14 +994,19 @@ class TextFormatter(argparse.RawTextHelpFormatter):
 
 if __name__ == "__main__":
     # Start the timer.
-    timer = Timer()
+    timer = Timer(msg="\nTotal runtime: ")
 
     # Get command line arguments.
     args = _parse_args()
 
     # Format arguments.
     proc_res = [args.final_res] * 3
-
+    skip_smooth = True
+    if args.smooth:
+        skip_smooth = False
+    skip_coreg = True
+    if args.coreg:
+        skip_coreg = False
     use_spm = False
     if args.use_spm:
         use_spm = True
@@ -856,92 +1015,119 @@ if __name__ == "__main__":
                 "SPM only supports 6-degree coregistration; over-riding --coreg_dof to 6"
             )
             args.coreg_dof = 6
-
     verbose = True
     if args.quiet:
         verbose = False
 
     # Get the dataframe of scans to process.
-    proc_df = find_scans_to_process(
-        args.base_dir,
+    pet_proc = find_scans_to_process(
+        base_dir=args.base_dir,
+        raw_dirname=args.raw_dirname,
+        proc_dirname=args.proc_dirname,
         process_subjs=args.subjects,
         proc_res=proc_res,
+        skip_smooth=skip_smooth,
+        skip_coreg=skip_coreg,
         overwrite=args.overwrite,
-        save_output=True,
-        verbose=verbose,
     )
     if verbose:
         print(
-            "Selected {}/{} subjects to process, with {}/{} subjects already processed".format(
-                proc_df["process"].sum(),
-                len(proc_df),
-                proc_df["processing_complete"].sum(),
-                len(proc_df),
+            "{}/{} subjects in {} have already been processed in data/{}/".format(
+                pet_proc["already_processed"].sum(),
+                len(pet_proc),
+                op.join(args.base_dir, "data", args.raw_dirname),
+                args.proc_dirname,
+            )
+        )
+        print(
+            "{}/{} subjects will now be processed".format(
+                pet_proc["to_process"].sum(),
+                len(pet_proc),
             )
         )
 
     # Process each scan and save a multislice PDF of the processed
     # image.
-    for subj in proc_df.query("process == True").index:
-        rsmean_petf = nops.find_gzip(
-            proc_df.at[subj, "rsmean_petf"], return_infile=True
-        )
-        if op.isfile(rsmean_petf) and args.skip_proc:
+    for subj in pet_proc.query("to_process == True").index:
+        if op.isfile(pet_proc.at[subj, "proc_petf"]) and not args.overwrite:
             if verbose:
+                subj = pet_proc.at[subj, "raw_cp_petf"].split(op.sep)[-5].split("-")[1]
+                print("\n{}\n{}".format(subj, "-" * len(subj)))
+                print("  Skipping PET processing (already complete)...")
                 print(
-                    "  Skipping image processing and jumping to multislice PDF creation"
+                    "  Processed PET image: {}/\n".format(
+                        op.dirname(pet_proc.at[subj, "proc_petf"])
+                    )
+                    + "                       {}".format(
+                        op.basename(pet_proc.at[subj, "proc_petf"])
+                    )
                 )
         else:
             # Process the PET image.
-            rsmean_petf = process_pet(
+            outfiles = process_pet(
                 base_dir=args.base_dir,
-                raw_petf=proc_df.at[subj, "raw_petf"],
-                mean_petf=proc_df.at[subj, "mean_petf"],
-                tracer=proc_df.at[subj, "tracer"],
-                input_res=proc_df.at[subj, "input_res"],
-                proc_res=proc_df.at[subj, "proc_res"],
+                raw_petf=pet_proc.at[subj, "raw_petf"],
+                raw_cp_petf=pet_proc.at[subj, "raw_cp_petf"],
+                tracer=pet_proc.at[subj, "tracer"],
+                input_res=pet_proc.at[subj, "input_res"],
+                proc_res=pet_proc.at[subj, "proc_res"],
                 coreg_dof=args.coreg_dof,
+                skip_smooth=skip_smooth,
+                skip_coreg=skip_coreg,
                 use_spm=use_spm,
+                gzip_niftis=args.gzip,
                 verbose=verbose,
             )
+            pet_proc.at[subj, "raw_cp_petf"] = outfiles[0]
+            pet_proc.at[subj, "proc_petf"] = outfiles[-1]
 
         if args.skip_multislice:
             if verbose:
-                print("  Skipping multislice PDF creation")
+                print("  Skipping multislice creation...")
         else:
             # Create the multislice PDF.
-            intermed_mslicef = create_multislice(
-                imagef=rsmean_petf,
+            multislicef = create_multislice(
+                imagef=pet_proc.at[subj, "proc_petf"],
                 subj=subj,
-                tracer=proc_df.at[subj, "tracer"],
-                pet_date=proc_df.at[subj, "pet_date"],
-                cut_coords=args.zslice,
+                tracer=pet_proc.at[subj, "tracer"],
+                pet_date=pet_proc.at[subj, "pet_date"],
+                cut_coords=args.slices,
+                crop=args.crop,
+                crop_cut=args.crop_cut,
                 cmap=args.cmap,
+                autoscale=args.autoscale,
                 vmin=args.vmin,
                 vmax=args.vmax,
                 overwrite=args.overwrite,
-                verbose=False,
+                verbose=verbose,
             )
+            pet_proc.at[subj, "multislicef"] = multislicef
 
             # Merge the subject's multislice images with the tracer
             # template.
-            mslicef = merge_multislice(
-                intermed_mslicef=intermed_mslicef,
+            merged_multislicef = merge_multislice(
+                infile=multislicef,
                 template_dir=op.join(args.base_dir, "templates"),
-                tracer=proc_df.at[subj, "tracer"],
-                remove_intermed=False,
+                tracer=pet_proc.at[subj, "tracer"],
+                remove_infile=False,
                 overwrite=args.overwrite,
                 verbose=verbose,
             )
+            pet_proc.at[subj, "merged_multislicef"] = merged_multislicef
 
         # Create a visual read file for this subject.
         pass
 
         # Print the runtime for this subject.
+        pet_proc.at[subj, "just_processed"] = True
         if verbose:
-            print(timer.loop(f"  {subj}"))
+            timer.loop(f"  Runtime")
+
+    # Save the logfile.
+    logfile = _save_logfile(args.base_dir, pet_proc, verbose)
 
     # Print the total runtime.
     if verbose:
         print(timer)
+
     sys.exit(0)
