@@ -135,6 +135,7 @@ def find_scans_to_process(
         raw_petf = pet_proc.at[subj, "raw_petf"]
 
         # Get the PET acquisition date.
+        # print(subj, pet_proc.loc[subj])
         pet_date_dir = raw_petf.split(op.sep)[-3]
         try:
             pet_date = datetime.datetime.strptime(
