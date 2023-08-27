@@ -1,5 +1,4 @@
-#!/Users/dschonhaut/mambaforge/envs/nipy310/bin/python
-
+#!/usr/bin/env python
 
 import sys
 import os
@@ -12,21 +11,22 @@ import shutil
 import datetime
 import numpy as np
 import pandas as pd
-import matplotlib
+import matplotlib as mpl
 import matplotlib.pyplot as plt
+import seaborn as sns
 import nibabel as nib
 from nilearn import plotting
-
-sys.path.append(op.join(op.expanduser("~"), "code"))
-import general.nifti.nifti_ops as nops
-import general.nifti.spm_preproc as spm_preproc
-import general.nifti.nifti_shell as niish
+import general.array.array_operations as aop
 from general.basic.helper_funcs import Timer
 import general.basic.str_methods as strm
+import general.nifti.nifti_ops as nops
+import general.nifti.nifti_plotting as niiplot
+import general.nifti.nifti_shell as niish
+import general.nifti.spm_preproc as spm_preproc
 import general.osops.os_utils as osu
-import general.array.array_operations as aop
 
-matplotlib.rcParams["pdf.fonttype"] = 42
+
+mpl.rcParams["pdf.fonttype"] = 42
 
 
 def find_scans_to_process(
@@ -502,222 +502,6 @@ def process_pet(
     return outfiles
 
 
-def create_multislice(
-    imagef,
-    subj,
-    tracer,
-    pet_date,
-    display_mode="z",
-    cut_coords=[-50, -37, -24, -11, 2, 15, 28, 41],
-    crop=True,
-    crop_cut=0.05,
-    annotate=False,
-    draw_cross=False,
-    colorbar=False,
-    cbar_tick_format="%.2f",
-    figsize=(13.33, 7.5),
-    dpi=300,
-    font={"tick": 12, "label": 14, "title": 16, "annot": 14},
-    cmap=None,
-    autoscale=False,
-    vmin=None,
-    vmax=None,
-    facecolor="k",
-    fontcolor="w",
-    title=None,
-    fig=None,
-    ax=None,
-    overwrite=False,
-    verbose=True,
-):
-    """Create a multi-slice plot of image and return the saved file.
-
-    Parameters
-    ----------
-    imagef : str
-        The path to the image file to plot.
-    subj : str
-        The subject ID.
-    tracer : str
-        The PET tracer used.
-    pet_date : str
-        The PET date.
-    display_mode : str, optional
-        The display mode to use.
-    cut_coords : list, optional
-        The cut coordinates to use.
-    crop : bool, optional
-        Whether to crop the image.
-    crop_cut : float, optional
-        The threshold to use for cropping.
-    annotate : bool, optional
-        Whether to annotate the slices.
-    draw_cross : bool, optional
-        Whether to draw a cross on the slices.
-    colorbar : bool, optional
-        Whether to draw a colorbar.
-    cbar_tick_format : str, optional
-        The format to use for the colorbar ticks.
-    figsize : tuple, optional
-        The figure size to use.
-    dpi : int, optional
-        The DPI to use.
-    font : dict, optional
-        The font sizes to use.
-    title : str, optional
-        The title to use.
-    fig : matplotlib.figure.Figure, optional
-        The figure to use.
-    ax : matplotlib.axes.Axes, optional
-        The axes to use.
-    overwrite : bool, optional
-        Whether to overwrite the output file if it already exists.
-    verbose : bool, optional
-        Whether to print status messages.
-    """
-    # Return the outfile if it already exists.
-    outfile = (
-        strm.add_presuf(imagef, suffix="_multislice")
-        .replace(".nii.gz", ".pdf")
-        .replace(".nii", ".pdf")
-    )
-    if op.isfile(outfile) and not overwrite:
-        if verbose:
-            print(
-                "  Multislice PDF: {}\n".format(op.dirname(outfile))
-                + "                  {}".format(op.basename(outfile))
-            )
-        return outfile
-
-    # Configure plot parameters.
-    tracer_fancy = {"FBB": "[18F]Florbetaben", "FBP": "[18F]Florbetapir"}[tracer]
-    if autoscale:
-        dat = nops.load_nii_flex(imagef, dat_only=True)
-        dat = dat[dat > 0]
-        vmin = 0.1
-        vmax = np.percentile(dat, 99.5)
-    if tracer == "FBB":
-        if cmap is None:
-            cmap = "binary_r"
-            facecolor = "k"
-            fontcolor = "w"
-        if not autoscale:
-            if vmin is None:
-                vmin = 0.1
-            if vmax is None:
-                vmax = 2.5
-    elif tracer == "FBP":
-        if cmap is None:
-            cmap = "binary"
-            facecolor = "w"
-            fontcolor = "k"
-        if not autoscale:
-            if vmin is None:
-                vmin = 0.1
-            if vmax is None:
-                vmax = 2.5
-    black_bg = True if facecolor == "k" else False
-    cbar_ticks = np.round(np.linspace(vmin, vmax, 3), 1)
-
-    # Crop the data array.
-    img, dat = nops.load_nii(imagef)
-    if crop:
-        mask = dat > (vmin * 2)
-        dat = aop.crop_arr3d(dat, mask, crop_cut)
-        img = nib.Nifti1Image(dat, img.affine)
-        img, *_ = nops.recenter_nii(img)
-
-    # Make the plot.
-    plt.close("all")
-    if fig is None or ax is None:
-        fig, ax = plt.subplots(
-            3, 1, height_ratios=[0.75, 5, 1.75], figsize=figsize, dpi=dpi
-        )
-        ax = np.ravel(ax)
-    else:
-        assert len(ax) == 3
-
-    iax = 1
-    _ax = ax[iax]
-    warnings.filterwarnings("ignore", category=UserWarning)
-    display = plotting.plot_anat(
-        img,
-        cut_coords=cut_coords,
-        display_mode=display_mode,
-        annotate=annotate,
-        draw_cross=draw_cross,
-        black_bg=black_bg,
-        cmap=cmap,
-        colorbar=colorbar,
-        cbar_tick_format=cbar_tick_format,
-        vmin=vmin,
-        vmax=vmax,
-        title=title,
-        figure=fig,
-        axes=_ax,
-    )
-    warnings.resetwarnings()
-
-    # Add the colorbar.
-    norm = plt.Normalize(vmin=vmin, vmax=vmax)
-    cbar = plt.colorbar(
-        plt.cm.ScalarMappable(norm=norm, cmap=cmap),
-        ax=_ax,
-        location="bottom",
-        pad=0.1,
-        shrink=0.25,
-        aspect=15,
-        drawedges=False,
-    )
-    cbar.outline.set_color(fontcolor)
-    cbar.outline.set_linewidth(1)
-    cbar.ax.tick_params(
-        labelsize=font["tick"], labelcolor=fontcolor, color=fontcolor, width=1
-    )
-    cbar.ax.set_xticks(cbar_ticks)
-    cbar.ax.set_xlabel(
-        f"{tracer_fancy} SUVR",
-        fontsize=font["label"],
-        color=fontcolor,
-        labelpad=8,
-    )
-
-    # Format the top and bottom of the figure.
-    for iax in [0, 2]:
-        _ax = ax[iax]
-        _ax.axis("off")
-
-    _ax = ax[0]
-    _ax.set_title(
-        f"Participant: {subj}\n"
-        + f"Scan date: {pet_date}\n"
-        + f"Tracer: {tracer_fancy}",
-        fontsize=font["title"],
-        color=fontcolor,
-        loc="left",
-    )
-
-    for iax in range(len(ax)):
-        _ax = ax[iax]
-        _ax.set_facecolor(facecolor)
-    fig.patch.set_facecolor(facecolor)
-
-    # Save the figure as a pdf.
-    fig.savefig(
-        outfile,
-        facecolor=facecolor,
-        dpi=dpi,
-        bbox_inches="tight",
-        pad_inches=0.2,
-    )
-    if verbose:
-        print(
-            "  Multislice PDF: {}\n".format(op.dirname(outfile))
-            + "                  {}".format(op.basename(outfile))
-        )
-    return outfile
-
-
 def merge_multislice(
     infile,
     template_dir,
@@ -1022,9 +806,7 @@ if __name__ == "__main__":
     if args.use_spm:
         use_spm = True
         if args.coreg_dof != 6:
-            print(
-                "SPM only supports 6-degree coregistration; over-riding --coreg_dof to 6"
-            )
+            print("SPM only supports 6-degree coregn; overriding --coreg_dof to 6")
             args.coreg_dof = 6
     verbose = True
     if args.quiet:
@@ -1099,18 +881,18 @@ if __name__ == "__main__":
                 print("  Skipping multislice creation...")
         else:
             # Create the multislice PDF.
-            multislicef = create_multislice(
+            multislicef = niiplot.create_multislice(
                 imagef=pet_proc.at[subj, "proc_petf"],
                 subj=subj,
                 tracer=pet_proc.at[subj, "tracer"],
-                pet_date=pet_proc.at[subj, "pet_date"],
+                image_date=pet_proc.at[subj, "pet_date"],
                 cut_coords=args.slices,
-                crop=args.crop,
-                crop_cut=args.crop_cut,
                 cmap=args.cmap,
-                autoscale=args.autoscale,
                 vmin=args.vmin,
                 vmax=args.vmax,
+                autoscale=args.autoscale,
+                crop=args.crop,
+                crop_cut=args.crop_cut,
                 overwrite=args.overwrite,
                 verbose=verbose,
             )
