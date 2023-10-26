@@ -231,7 +231,7 @@ def find_scans_to_process(
 
 def _get_raw_files(base_dir, raw_dirname, subj):
     raw_pet_files = glob(
-        op.join(base_dir, "data", raw_dirname, f"sub-{subj}", "**", "*.nii*"),
+        op.join(base_dir, "data", raw_dirname, subj, "**", "*.nii*"),
         recursive=True,
     )
     return raw_pet_files
@@ -244,14 +244,14 @@ def _get_proc_files(
         base_dir,
         "data",
         proc_dirname,
-        f"sub-{subj}",
+        subj,
         f"pet-{tracer}",
         f"ses-{pet_date}",
     )
     intermed_dir = op.join(proc_dir, "intermed")
     proc_files = od([])
     proc_files["raw_cp_petf"] = op.join(
-        intermed_dir, f"mean_sub-{subj}_pet-{tracer}_ses-{pet_date}.nii"
+        intermed_dir, f"mean_{subj}_pet-{tracer}_ses-{pet_date}.nii"
     )
     if skip_smooth and skip_coreg:
         proc_files["proc_petf"] = op.join(
@@ -570,8 +570,8 @@ def _parse_args():
 
 steps:
   [1] Copy PET scan from [base_dir]/data/[raw_dirname]/[subject]/[nested_dirs_from_LONI]/[pet_scan].nii
-      to [base_dir]/data/[proc_dirname]/sub-[subject]/pet-[tracer]/ses-[pet_date]/intermed/
-      mean_sub-[subject]_pet-[tracer]_ses-[pet_date].nii
+      to [base_dir]/data/[proc_dirname]/[subject]/pet-[tracer]/ses-[pet_date]/intermed/
+      mean_[subject]_pet-[tracer]_ses-[pet_date].nii
   [2] Reset origin to center (saves over header info of the copied image)
   [3] Smooth PET to a defined resolution (default 8mm isotropic). Note that if the input
       and final resolutions are the same, smoothing is skipped (optional step,
