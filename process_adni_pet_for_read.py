@@ -5,17 +5,12 @@ import os
 import os.path as op
 import argparse
 from glob import glob
-import warnings
 from collections import OrderedDict as od
 import shutil
 import datetime
 import numpy as np
 import pandas as pd
 import matplotlib as mpl
-import matplotlib.pyplot as plt
-import seaborn as sns
-import nibabel as nib
-from nilearn import plotting
 import general.array.array_operations as aop
 from general.basic.helper_funcs import Timer
 import general.basic.str_methods as strm
