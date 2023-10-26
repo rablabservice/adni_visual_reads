@@ -575,10 +575,10 @@ steps:
   [2] Reset origin to center (saves over header info of the copied image)
   [3] Smooth PET to a defined resolution (default 8mm isotropic). Note that if the input
       and final resolutions are the same, smoothing is skipped (optional step,
-      default=True)
+      default=False)
   [4] [Coregister and reslice PET (default 6-degree rigid body transform) to a standard
        space (optional step, default=False)]
-  [5] Gzip NIfTI files (optional step, default=True)
+  [5] Gzip NIfTI files (optional step, default=False)
   [6] Save a PDF of axial multislices of the processed PET scan and a merged PDF
       that also shows canonical positive and negative scans for the same tracer""",
         formatter_class=TextFormatter,
@@ -662,7 +662,7 @@ steps:
     )
     parser.add_argument(
         "--gzip",
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
         help="Gzip processed NIfTI files (raw files are untouched)",
     )
