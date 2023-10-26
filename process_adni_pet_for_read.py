@@ -11,7 +11,6 @@ import datetime
 import numpy as np
 import pandas as pd
 import matplotlib as mpl
-import general.array.array_operations as aop
 from general.basic.helper_funcs import Timer
 import general.basic.str_methods as strm
 import general.nifti.nifti_ops as nops
@@ -582,7 +581,7 @@ steps:
     parser.add_argument(
         "--base_dir",
         type=str,
-        default="/Volumes/petcore/Projects/ADNI_Reads",
+        default="/shared/petcore/Projects/ADNI_Reads",
         help=(
             "Path to base directory where data/ and templates/ are stored\n"
             + "(default: %(default)s)"
