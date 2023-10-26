@@ -625,7 +625,7 @@ steps:
     )
     parser.add_argument(
         "--smooth",
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
         help="Smooth PET to the resolution defined by --final_res",
     )
