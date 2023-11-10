@@ -712,12 +712,23 @@ steps:
         help="Crop the multislice images to the brain",
     )
     parser.add_argument(
+        "--mask_thresh",
+        type=float,
+        default=0.5,
+        help=(
+            "Cropping threshold for defining empty voxels outside the brain;\n"
+            + "used together with crop_prop to determine how aggresively\n"
+            + "to remove planes of mostly empty space around the image\n"
+            + "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--crop_prop",
         type=float,
         default=0.05,
         help=(
             "Defines how tightly to crop the brain for multislice creation\n"
-            + "(proportion of voxels > 0 in each plane that are allowed to be cropped)\n"
+            + "(proportion of empty voxels in each plane that are allowed to be cropped)\n"
             + "(default: %(default)s)"
         ),
     )
@@ -908,6 +919,7 @@ if __name__ == "__main__":
                 vmax=args.vmax,
                 autoscale=args.autoscale,
                 crop=args.crop,
+                mask_thresh=args.mask_thresh,
                 crop_prop=args.crop_prop,
                 overwrite=args.overwrite,
                 verbose=verbose,
