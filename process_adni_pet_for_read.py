@@ -714,7 +714,7 @@ steps:
     parser.add_argument(
         "--mask_thresh",
         type=float,
-        default=0.5,
+        default=0.05,
         help=(
             "Cropping threshold for defining empty voxels outside the brain;\n"
             + "used together with crop_prop to determine how aggresively\n"
@@ -763,6 +763,15 @@ steps:
         help=(
             "Maximum intensity threshold for the multislice images\n"
             + "(overrides the tracer-specific defaults)"
+        ),
+    )
+    parser.add_argument(
+        "--n_cbar_ticks",
+        type=float,
+        default=2,
+        help=(
+            "Number of ticks to show for the  multislice PDF colorbar\n"
+            + "(default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -918,6 +927,7 @@ if __name__ == "__main__":
                 vmin=args.vmin,
                 vmax=args.vmax,
                 autoscale=args.autoscale,
+                n_cbar_ticks=args.n_cbar_ticks,
                 crop=args.crop,
                 mask_thresh=args.mask_thresh,
                 crop_prop=args.crop_prop,
