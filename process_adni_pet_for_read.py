@@ -917,7 +917,7 @@ if __name__ == "__main__":
                 print("  Skipping multislice creation...")
         else:
             # Create the multislice PDF.
-            multislicef = niiplot.create_multislice(
+            _, multislicef = niiplot.create_multislice(
                 imagef=pet_proc.at[idx, "proc_petf"],
                 subj=pet_proc.at[idx, "subj"],
                 tracer=pet_proc.at[idx, "tracer"],
