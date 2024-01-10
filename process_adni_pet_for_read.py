@@ -13,9 +13,6 @@ import pandas as pd
 from general.basic.helper_funcs import *
 import general.basic.str_methods as strm
 import general.nifti.nifti_ops as nops
-import general.nifti.nifti_plotting as niiplot
-import general.nifti.nifti_shell as niish
-import general.nifti.spm_preproc as spm_preproc
 import general.osops.os_utils as osu
 
 
@@ -92,6 +89,7 @@ def find_scans_to_process(
         subj_dir = op.join(base_dir, "data", raw_dirname, subj)
         subj_info = _get_recon_info(subj_dir)
         pet_proc = pd.concat((pet_proc, subj_info), ignore_index=True)
+
     pet_proc["to_process"] = pet_proc.apply(
         lambda x: np.invert(
             np.any(pd.isna([x["pet_date"], x["tracer"], x["input_res"], x["raw_petf"]]))
@@ -326,9 +324,7 @@ def _get_proc_files(
         f"{tracer}_{pet_date}",
     )
     proc_files = od([])
-    proc_files["raw_cp_petf"] = op.join(
-        proc_dir, f"mean_{subj}_{tracer}_{pet_date}.nii"
-    )
+    proc_files["raw_cp_petf"] = op.join(proc_dir, f"{subj}_{tracer}_{pet_date}.nii")
     if skip_smooth and skip_coreg:
         proc_files["proc_petf"] = proc_files["raw_cp_petf"]
     elif skip_coreg and not skip_smooth:
@@ -383,6 +379,7 @@ def process_pet(
     raw_petf,
     raw_cp_petf,
     tracer,
+    scan_quant=None,
     input_res=[6, 6, 6],
     proc_res=[6, 6, 6],
     coreg_dof=6,
@@ -403,19 +400,32 @@ def process_pet(
         therefore exist.
     """
     if verbose:
-        scan = "_".join(op.basename(raw_cp_petf).split("_")[1:4])
+        scan = "_".join(op.basename(raw_cp_petf).split("_")[:3])
         print("\n{}\n{}".format(scan, "-" * len(scan)))
 
     # Delete existing processed files.
-    proc_dir = op.dirname(op.dirname(raw_cp_petf))
-    osu.rm_files(proc_dir)
+    proc_dir = op.dirname(raw_cp_petf)
+    if op.isdir(proc_dir):
+        osu.rm_files(proc_dir)
 
     # Setup proc directory structure.
     if verbose:
         print("  Setting up directories...")
-    os.makedirs(op.dirname(raw_cp_petf), exist_ok=True)
-    os.chdir(op.dirname(raw_cp_petf))
+    os.makedirs(proc_dir, exist_ok=True)
+    os.chdir(proc_dir)
     outfiles = []
+
+    # Create the quantification CSV file.
+    if scan_quant is not None:
+        if verbose:
+            print("  Creating quantification CSV file...")
+        quant_dir = op.join(proc_dir, "quantification")
+        os.makedirs(quant_dir, exist_ok=True)
+        quantf = op.join(
+            quant_dir,
+            "{}_quantification.csv".format(op.basename(raw_cp_petf).split(".")[0]),
+        )
+        scan_quant.to_csv(quantf, index=False)
 
     # Copy out the raw PET file.
     if verbose:
@@ -443,6 +453,8 @@ def process_pet(
     # Smooth PET to target resolution.
     if not skip_smooth:
         if use_spm:
+            import general.nifti.spm_preproc as spm_preproc
+
             if verbose:
                 print("  Smoothing PET (SPM)...")
             if outfiles[-1].endswith(".nii.gz"):
@@ -454,6 +466,8 @@ def process_pet(
                 prefix=f"s{proc_res[0]}",
             )[0]
         else:
+            import general.nifti.nifti_shell as niish
+
             if verbose:
                 print("  Smoothing PET (niimath)...")
             _outfile = niish.niimath_smooth(
@@ -473,6 +487,8 @@ def process_pet(
             raise_error=True,
         )
         if use_spm:
+            import general.nifti.spm_preproc as spm_preproc
+
             if verbose:
                 print(
                     f"  Applying 6-degree linear coreg and reslicing PET to target res (SPM12)..."
@@ -486,6 +502,8 @@ def process_pet(
                 source=outfiles[-1], target=targetf, jobtype=jobtype, out_prefix="r"
             )[0]
         else:
+            import general.nifti.nifti_shell as niish
+
             if verbose:
                 print(
                     f"  Applying {coreg_dof}-degree linear coreg and reslicing PET to target res (FSL)..."
@@ -585,7 +603,7 @@ def _parse_args():
 
 steps:
   [1] Copy PET scan from [base_dir]/data/[raw_dirname]/[subject]/[nested_dirs_from_LONI]/[pet_scan].nii to
-      [base_dir]/data/[proc_dirname]/[subject]/[tracer]_[pet_date]/mean_[subject]_[tracer]_[pet_date].nii
+      [base_dir]/data/[proc_dirname]/[subject]/[tracer]_[pet_date]/[subject]_[tracer]_[pet_date].nii
   [2] Convert DICOMS to NIFTI (if scans are not already provided as NIFTIs)
   [3] Reset origin to center (saves over header info of the copied image)
   [4] Save a PDF of axial multislices of the processed PET scan and a merged PDF
@@ -697,9 +715,6 @@ steps:
         type=int,
         nargs="+",
         default=[-50, -38, -26, -14, -2, 10, 22, 34],
-        # [-50, -37, -24, -11, 2, 15, 28, 41],
-        # [-32, -18, -4, 10, 24, 38, 52]
-        # [-51, -30, -21, -6, 9, 24, 39, 54]
         help=(
             "List of image slices to show along the z-axis, in MNI coordinates\n"
             + "(default: %(default)s)"
@@ -744,9 +759,10 @@ steps:
         "--autoscale",
         action="store_true",
         help=(
-            "Set multislice vmin and vmax to to 0.01 and the 99.5th percentile\n"
-            + "of nonzero values, respectively (overrides --vmin, --vmax,\n"
-            + "and tracer-specific default scaling)"
+            "Set multislice vmin and vmax to the 0.5th and 99.5th percentiles\n"
+            + "of image values > 0. Overridden by --vmin and --vmax, so setting\n"
+            + "--vmin 0 --autoscale for example would set vmin to 0 and only\n"
+            + "autoscale vmax. Overrides tracer-specific default thresholds"
         ),
     )
     parser.add_argument(
@@ -787,11 +803,6 @@ steps:
         parser.print_help()
         sys.exit()
     return args
-
-
-def create_read_file():
-    """Create a visual read CSV file for the reader to complete."""
-    pass
 
 
 class TextFormatter(argparse.RawTextHelpFormatter):
@@ -873,7 +884,26 @@ if __name__ == "__main__":
 
     # Process each scan and save a multislice PDF of the processed
     # image.
-    for idx in pet_proc.query("to_process == True").index:
+    process_idx = pet_proc.query("to_process == True").index
+
+    # Load the scan-tracking spreadsheet.
+    if len(process_idx) > 0:
+        all_scansf = op.join(
+            args.base_dir, "metadata", "ADNI4_visual_reads_tracking.xlsx"
+        )
+        all_scan_quant = pd.read_excel(all_scansf)
+        keep_cols = [
+            "PTID",
+            "SCANDATE",
+            "TRACER",
+            "AMYLOID_STATUS",
+            "CENTILOIDS",
+            "GAAIN_SUMMARY_SUVR",
+        ]
+        all_scan_quant = all_scan_quant[keep_cols]
+        all_scan_quant["SCANDATE"] = all_scan_quant["SCANDATE"].dt.strftime("%Y-%m-%d")
+
+    for idx in process_idx:
         if op.isfile(pet_proc.at[idx, "proc_petf"]) and (
             args.skip_proc or not args.overwrite
         ):
@@ -894,6 +924,23 @@ if __name__ == "__main__":
                     )
                 )
         else:
+            scan_quant = all_scan_quant.query(
+                "(PTID=='{}') & (SCANDATE=='{}') & (TRACER=='{}')".format(
+                    pet_proc.at[idx, "subj"],
+                    pet_proc.at[idx, "pet_date"],
+                    pet_proc.at[idx, "tracer"],
+                )
+            )
+            if len(scan_quant) == 0:
+                print("\n{}\n{}".format(scan, "-" * len(scan)))
+                print(f"  Skipping PET processing (scan not found in {all_scansf})...")
+                continue
+            elif len(scan_quant) > 1:
+                print("\n{}\n{}".format(scan, "-" * len(scan)))
+                print(
+                    f"  Skipping PET processing (multiple matching scans found in {all_scansf})..."
+                )
+                continue
             # Process the PET image.
             outfiles = process_pet(
                 base_dir=args.base_dir,
@@ -902,6 +949,7 @@ if __name__ == "__main__":
                 tracer=pet_proc.at[idx, "tracer"],
                 input_res=pet_proc.at[idx, "input_res"],
                 proc_res=pet_proc.at[idx, "proc_res"],
+                scan_quant=scan_quant,
                 coreg_dof=args.coreg_dof,
                 skip_smooth=skip_smooth,
                 skip_coreg=skip_coreg,
@@ -917,6 +965,8 @@ if __name__ == "__main__":
                 print("  Skipping multislice creation...")
         else:
             # Create the multislice PDF.
+            import general.nifti.nifti_plotting as niiplot
+
             _, multislicef = niiplot.create_multislice(
                 imagef=pet_proc.at[idx, "proc_petf"],
                 subj=pet_proc.at[idx, "subj"],
