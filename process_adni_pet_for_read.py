@@ -405,8 +405,14 @@ def process_pet(
 
     # Delete existing processed files.
     proc_dir = op.dirname(raw_cp_petf)
+    print(f"proc_dir = {proc_dir}")
     if op.isdir(proc_dir):
-        osu.rm_files(proc_dir)
+        for *_, files in os.walk(proc_dir):
+            for f in files:
+                try:
+                    os.remove(f)
+                except FileNotFoundError:
+                    pass
 
     # Setup proc directory structure.
     if verbose:
@@ -756,18 +762,9 @@ steps:
         ),
     )
     parser.add_argument(
-        "--autoscale",
-        action="store_true",
-        help=(
-            "Set multislice vmin and vmax to the 0.5th and 99.5th percentiles\n"
-            + "of image values > 0. Overridden by --vmin and --vmax, so setting\n"
-            + "--vmin 0 --autoscale for example would set vmin to 0 and only\n"
-            + "autoscale vmax. Overrides tracer-specific default thresholds"
-        ),
-    )
-    parser.add_argument(
         "--vmin",
         type=float,
+        default=0,
         help=(
             "Minimum intensity threshold for the multislice images\n"
             + "(overrides the tracer-specific defaults)"
@@ -779,6 +776,24 @@ steps:
         help=(
             "Maximum intensity threshold for the multislice images\n"
             + "(overrides the tracer-specific defaults)"
+        ),
+    )
+    parser.add_argument(
+        "--autoscale",
+        action="store_true",
+        help=(
+            "Autoscale vmax to a percentile of image values > 0\n"
+            + "(see --autoscale_max_pct). Overridden by --vmax, so don't\n"
+            + "both setting both of these options"
+        ),
+    )
+    parser.add_argument(
+        "--autoscale_max_pct",
+        type=float,
+        default=99.9,
+        help=(
+            "Set the percentile of included voxel values to use for autoscaling\n"
+            + "the maximum colormap intensity (vmax)"
         ),
     )
     parser.add_argument(
@@ -795,6 +810,10 @@ steps:
     )
     parser.add_argument(
         "-q", "--quiet", action="store_true", help="Run without printing output"
+    )
+    parser.add_argument(
+        "-d", "--dry_run", action="store_true",
+        help="Show what scans would be processed but don't actually do anything"
     )
 
     # Parse the command line arguments
@@ -836,6 +855,9 @@ if __name__ == "__main__":
 
     # Get command line arguments.
     args = _parse_args()
+
+    # Set hard-coded defaults.
+    hide_cbar_values = True
 
     # Format arguments.
     proc_res = [args.final_res] * 3
@@ -886,6 +908,14 @@ if __name__ == "__main__":
     # image.
     process_idx = pet_proc.query("to_process == True").index
 
+    # Print the scans that would be processed and exit if --dry_run
+    if args.dry_run:
+        if len(process_idx) > 0:
+            for idx in process_idx:
+                print(f"  {pet_proc.at[idx, 'subj']}_{pet_proc.at[idx, 'tracer']}_{pet_proc.at[idx, 'pet_date']}")
+        print("\nDry run complete. Exiting.")
+        sys.exit(0)
+
     # Load the scan-tracking spreadsheet.
     if len(process_idx) > 0:
         all_scansf = op.join(
@@ -904,15 +934,15 @@ if __name__ == "__main__":
         all_scan_quant["SCANDATE"] = all_scan_quant["SCANDATE"].dt.strftime("%Y-%m-%d")
 
     for idx in process_idx:
-        if op.isfile(pet_proc.at[idx, "proc_petf"]) and (
-            args.skip_proc or not args.overwrite
-        ):
-            if verbose:
-                scan = "{}_{}_{}".format(
+        scan = "{}_{}_{}".format(
                     pet_proc.at[idx, "subj"],
                     pet_proc.at[idx, "tracer"],
                     pet_proc.at[idx, "pet_date"],
                 )
+        if op.isfile(pet_proc.at[idx, "proc_petf"]) and (
+            args.skip_proc or not args.overwrite
+        ):
+            if verbose:
                 print("\n{}\n{}".format(scan, "-" * len(scan)))
                 print("  Skipping PET processing (already complete)...")
                 print(
@@ -924,13 +954,12 @@ if __name__ == "__main__":
                     )
                 )
         else:
-            scan_quant = all_scan_quant.query(
-                "(PTID=='{}') & (SCANDATE=='{}') & (TRACER=='{}')".format(
-                    pet_proc.at[idx, "subj"],
-                    pet_proc.at[idx, "pet_date"],
-                    pet_proc.at[idx, "tracer"],
-                )
+            scan_qry = "(PTID=='{}') & (SCANDATE=='{}') & (TRACER=='{}')".format(
+                pet_proc.at[idx, "subj"],
+                pet_proc.at[idx, "pet_date"],
+                pet_proc.at[idx, "tracer"],
             )
+            scan_quant = all_scan_quant.query(scan_qry)
             if len(scan_quant) == 0:
                 print("\n{}\n{}".format(scan, "-" * len(scan)))
                 print(f"  Skipping PET processing (scan not found in {all_scansf})...")
@@ -976,8 +1005,9 @@ if __name__ == "__main__":
                 cmap=args.cmap,
                 vmin=args.vmin,
                 vmax=args.vmax,
+                hide_cbar_values=hide_cbar_values,
                 autoscale=args.autoscale,
-                n_cbar_ticks=args.n_cbar_ticks,
+                autoscale_max_pct=args.autoscale_max_pct,
                 crop=args.crop,
                 mask_thresh=args.mask_thresh,
                 crop_prop=args.crop_prop,
