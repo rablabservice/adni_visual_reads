@@ -790,10 +790,11 @@ steps:
     parser.add_argument(
         "--autoscale_max_pct",
         type=float,
-        default=99.9,
+        default=99.5,
         help=(
             "Set the percentile of included voxel values to use for autoscaling\n"
-            + "the maximum colormap intensity (vmax)"
+            + "the maximum colormap intensity (vmax)\n"
+            + "(default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -812,8 +813,10 @@ steps:
         "-q", "--quiet", action="store_true", help="Run without printing output"
     )
     parser.add_argument(
-        "-d", "--dry_run", action="store_true",
-        help="Show what scans would be processed but don't actually do anything"
+        "-d",
+        "--dry_run",
+        action="store_true",
+        help="Show what scans would be processed but don't actually do anything",
     )
 
     # Parse the command line arguments
@@ -912,7 +915,9 @@ if __name__ == "__main__":
     if args.dry_run:
         if len(process_idx) > 0:
             for idx in process_idx:
-                print(f"  {pet_proc.at[idx, 'subj']}_{pet_proc.at[idx, 'tracer']}_{pet_proc.at[idx, 'pet_date']}")
+                print(
+                    f"  {pet_proc.at[idx, 'subj']}_{pet_proc.at[idx, 'tracer']}_{pet_proc.at[idx, 'pet_date']}"
+                )
         print("\nDry run complete. Exiting.")
         sys.exit(0)
 
@@ -935,10 +940,10 @@ if __name__ == "__main__":
 
     for idx in process_idx:
         scan = "{}_{}_{}".format(
-                    pet_proc.at[idx, "subj"],
-                    pet_proc.at[idx, "tracer"],
-                    pet_proc.at[idx, "pet_date"],
-                )
+            pet_proc.at[idx, "subj"],
+            pet_proc.at[idx, "tracer"],
+            pet_proc.at[idx, "pet_date"],
+        )
         if op.isfile(pet_proc.at[idx, "proc_petf"]) and (
             args.skip_proc or not args.overwrite
         ):
