@@ -937,6 +937,8 @@ if __name__ == "__main__":
         ]
         all_scan_quant = all_scan_quant[keep_cols]
         all_scan_quant["SCANDATE"] = all_scan_quant["SCANDATE"].dt.strftime("%Y-%m-%d")
+        suvr_thresholds = {"fbb": 1.12, "fbp": 1.17, "nav": 1.14}
+        all_scan_quant["SUVR_THRESHOLD"] = all_scan_quant["TRACER"].apply(lambda x: suvr_thresholds.get(x.lower(), np.nan))
 
     for idx in process_idx:
         scan = "{}_{}_{}".format(
