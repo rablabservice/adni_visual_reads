@@ -15,6 +15,7 @@ import general.basic.str_methods as strm
 import general.nifti.nifti_ops as nops
 import general.osops.os_utils as osu
 
+# Testing the new repository structure on github
 
 def find_scans_to_process(
     base_dir="/shared/petcore/Projects/ADNI_Reads",
